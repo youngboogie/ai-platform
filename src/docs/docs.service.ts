@@ -24,7 +24,9 @@ export class DocsService {
     const embeddingApiKey = process.env.EMBEDDING_API_KEY;
 
     if (!embeddingApiKey) {
-      throw new InternalServerErrorException('EMBEDDING_API_KEY is not configured');
+      throw new InternalServerErrorException(
+        'EMBEDDING_API_KEY is not configured',
+      );
     }
 
     try {
@@ -120,6 +122,80 @@ export class DocsService {
     return this.prisma.document.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
+      include: {
+        _count: {
+          select: {
+            chunks: true,
+          },
+        },
+      },
     });
+  }
+  async deleteDocument(userId: string, documentId: string) {
+    const doc = await this.prisma.document.findFirst({
+      where: {
+        id: documentId,
+        userId,
+      },
+    });
+
+    if (!doc) {
+      throw new BadRequestException('Document not found');
+    }
+
+    await this.prisma.document.delete({
+      where: {
+        id: documentId,
+      },
+    });
+
+    return { message: 'Document deleted successfully' };
+  }
+  async searchRelevantChunks(userId: string, query: string, topK = 5) {
+    const queryEmbedding = await this.getEmbedding(query);
+
+    const chunks = await this.prisma.documentChunk.findMany({
+      where: {
+        document: {
+          userId,
+        },
+      },
+      include: {
+        document: true,
+      },
+    });
+
+    const minSimilarity = 0.75;
+
+    const scored = chunks
+      .filter((c) => Array.isArray(c.embedding))
+      .map((c) => {
+        const emb = c.embedding as number[];
+
+        return {
+          ...c,
+          similarity: this.cosineSimilarity(queryEmbedding, emb),
+        };
+      })
+      .filter((c) => c.similarity >= minSimilarity)
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, topK);
+
+    return scored;
+  }
+
+  // ================== 👇👇👇 新增：余弦相似度 ==================
+  private cosineSimilarity(a: number[], b: number[]) {
+    let dot = 0,
+      na = 0,
+      nb = 0;
+
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      na += a[i] * a[i];
+      nb += b[i] * b[i];
+    }
+
+    return dot / (Math.sqrt(na) * Math.sqrt(nb));
   }
 }

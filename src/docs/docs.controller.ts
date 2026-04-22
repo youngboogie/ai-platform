@@ -6,6 +6,8 @@ import {
   UploadedFile,
   Req,
   Get,
+  Delete,
+  Param,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
@@ -45,5 +47,11 @@ export class DocsController {
   @UseGuards(JwtAuthGuard)
   getMyDocs(@Req() req: { user: JwtUser }) {
     return this.docsService.getUserDocuments(req.user.sub);
+  }
+
+  @Delete(':id')
+  @UseGuards(JwtAuthGuard)
+  deleteDoc(@Param('id') id: string, @Req() req: { user: JwtUser }) {
+    return this.docsService.deleteDocument(req.user.sub, id);
   }
 }

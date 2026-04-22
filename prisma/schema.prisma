@@ -66,5 +66,5 @@ model DocumentChunk {
   embedding  Json?
   createdAt  DateTime @default(now())
 
-  document   Document @relation(fields: [documentId], references: [id])
+  document   Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
 }
