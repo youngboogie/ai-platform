@@ -85,11 +85,13 @@ export class ChatService {
         },
       });
 
-      const history = await this.prisma.message.findMany({
+      const recentHistory = await this.prisma.message.findMany({
         where: { sessionId },
-        orderBy: { createdAt: 'asc' },
-        take: 10,
+        orderBy: { createdAt: 'desc' },
+        take: 6,
       });
+
+      const history = recentHistory.reverse();
 
       const historyMessages = history.map((m) => ({
         role: m.role,
