@@ -1,0 +1,124 @@
+:root {
+  font-family: "Poppins", "Noto Sans SC", sans-serif;
+  color: #1d2735;
+  line-height: 1.5;
+  font-weight: 400;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  --bg-main: linear-gradient(135deg, #f4fbff 0%, #f2f4ff 42%, #fff8ee 100%);
+  --card-bg: rgba(255, 255, 255, 0.92);
+  --border: #d6e2f3;
+  --shadow: 0 16px 48px rgba(40, 83, 159, 0.15);
+  --primary: #2563eb;
+  --primary-hover: #1748bd;
+  --danger: #cc2e43;
+  --muted: #6c7c93;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  min-height: 100%;
+  width: 100%;
+}
+
+body {
+  background: var(--bg-main);
+  position: relative;
+  overflow-x: hidden;
+}
+
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  width: 380px;
+  height: 380px;
+  border-radius: 50%;
+  filter: blur(24px);
+  z-index: -1;
+}
+
+body::before {
+  background: rgba(37, 99, 235, 0.16);
+  top: -100px;
+  right: -80px;
+}
+
+body::after {
+  background: rgba(255, 128, 66, 0.14);
+  left: -90px;
+  bottom: -120px;
+}
+
+a {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--primary-hover);
+}
+
+.btn {
+  border: none;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.2s ease;
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 10px 24px rgba(37, 99, 235, 0.3);
+}
+
+.btn-secondary {
+  background: #e8f0ff;
+  color: #2455c0;
+}
+
+.btn-danger {
+  background: #ffe7eb;
+  color: var(--danger);
+}
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(8px);
+}
+
+.fade-in {
+  animation: fadeInUp 0.35s ease both;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

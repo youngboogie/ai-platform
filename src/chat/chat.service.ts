@@ -1,4 +1,8 @@
-﻿import { Injectable, InternalServerErrorException } from '@nestjs/common';
+﻿import {
+  BadRequestException,
+  Injectable,
+  InternalServerErrorException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import { DocsService } from '../docs/docs.service';
 import { ChatOpenAI } from '@langchain/openai';
@@ -7,6 +11,7 @@ import { PgVectorRetriever } from '../docs/pgvector.retriever';
 import { RunnableSequence } from '@langchain/core/runnables';
 import { Document } from '@langchain/core/documents';
 import { createRagGraph } from './rag.graph';
+
 type JwtUser = {
   sub: string;
   email: string;
@@ -53,6 +58,30 @@ export class ChatService {
       where: { sessionId },
       orderBy: { createdAt: 'asc' },
     });
+  }
+
+  async deleteSession(userId: string, sessionId: string) {
+    const session = await this.prisma.session.findFirst({
+      where: {
+        id: sessionId,
+        userId,
+      },
+    });
+
+    if (!session) {
+      throw new BadRequestException('Session not found');
+    }
+
+    await this.prisma.$transaction([
+      this.prisma.message.deleteMany({
+        where: { sessionId },
+      }),
+      this.prisma.session.delete({
+        where: { id: sessionId },
+      }),
+    ]);
+
+    return { message: 'Session deleted successfully' };
   }
 
   async sendMessage(message: string, user: JwtUser, sessionId: string) {

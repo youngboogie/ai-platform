@@ -6,6 +6,7 @@
   UseGuards,
   Get,
   Param,
+  Delete,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ChatService } from './chat.service';
@@ -47,5 +48,11 @@ export class ChatController {
   @UseGuards(JwtAuthGuard)
   getMessages(@Req() req: { user: JwtUser }, @Param('id') id: string) {
     return this.chatService.getSessionMessages(req.user.sub, id);
+  }
+
+  @Delete('sessions/:id')
+  @UseGuards(JwtAuthGuard)
+  deleteSession(@Req() req: { user: JwtUser }, @Param('id') id: string) {
+    return this.chatService.deleteSession(req.user.sub, id);
   }
 }
