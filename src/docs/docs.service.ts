@@ -9,42 +9,30 @@ import { CSVLoader } from '@langchain/community/document_loaders/fs/csv';
 import { DocxLoader } from '@langchain/community/document_loaders/fs/docx';
 import * as fs from 'fs/promises';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
-import axios from 'axios';
+import { OpenAIEmbeddings } from '@langchain/openai';
+import { randomUUID } from 'crypto';
 
 @Injectable()
 export class DocsService {
   constructor(private prisma: PrismaService) {}
 
-  async getEmbedding(text: string) {
-    const embeddingUrl =
-      process.env.EMBEDDING_ENDPOINT ??
-      'https://api.siliconflow.cn/v1/embeddings';
-    const embeddingModel =
-      process.env.EMBEDDING_MODEL ?? 'BAAI/bge-large-zh-v1.5';
-    const embeddingApiKey = process.env.EMBEDDING_API_KEY;
+  private embeddings = new OpenAIEmbeddings({
+    model: process.env.EMBEDDING_MODEL ?? 'text-embedding-3-small',
+    apiKey: process.env.EMBEDDING_API_KEY,
+    configuration: {
+      baseURL: process.env.EMBEDDING_ENDPOINT ?? 'https://api.openai.com/v1',
+    },
+  });
 
-    if (!embeddingApiKey) {
+  async getEmbedding(text: string) {
+    if (!process.env.EMBEDDING_API_KEY) {
       throw new InternalServerErrorException(
         'EMBEDDING_API_KEY is not configured',
       );
     }
 
     try {
-      const response = await axios.post(
-        embeddingUrl,
-        {
-          model: embeddingModel,
-          input: text,
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${embeddingApiKey}`,
-            'Content-Type': 'application/json',
-          },
-        },
-      );
-
-      return response.data?.data?.[0]?.embedding ?? null;
+      return await this.embeddings.embedQuery(text);
     } catch (error: any) {
       console.error('Embedding error:', error?.response?.data || error.message);
       throw new InternalServerErrorException({
@@ -106,15 +94,20 @@ export class DocsService {
 
     for (const chunk of splitDocs) {
       const embedding = await this.getEmbedding(chunk.pageContent);
+      const vector = `[${embedding.join(',')}]`;
 
-      await this.prisma.documentChunk.create({
-        data: {
-          documentId: doc.id,
-          content: chunk.pageContent,
-          embedding,
-        },
-      });
+      await this.prisma.$executeRawUnsafe(
+        `
+        INSERT INTO "DocumentChunk" ("id", "documentId", "content", "embedding")
+        VALUES ($1, $2, $3, $4::vector)
+        `,
+        randomUUID(),
+        doc.id,
+        chunk.pageContent,
+        vector,
+      );
     }
+
     return doc;
   }
 
@@ -131,6 +124,7 @@ export class DocsService {
       },
     });
   }
+
   async deleteDocument(userId: string, documentId: string) {
     const doc = await this.prisma.document.findFirst({
       where: {
@@ -151,51 +145,136 @@ export class DocsService {
 
     return { message: 'Document deleted successfully' };
   }
+
+  // ✅ 纯向量检索：pgvector 根据语义相似度找 chunk
   async searchRelevantChunks(userId: string, query: string, topK = 5) {
     const queryEmbedding = await this.getEmbedding(query);
+    const vector = `[${queryEmbedding.join(',')}]`;
 
-    const chunks = await this.prisma.documentChunk.findMany({
-      where: {
-        document: {
-          userId,
-        },
-      },
-      include: {
-        document: true,
-      },
-    });
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+      SELECT 
+        dc."id",
+        dc."documentId",
+        dc."content",
+        dc."createdAt",
+        d."fileName",
+        1 - (dc."embedding" <=> $1::vector) AS similarity,
+        'vector' AS "searchType"
+      FROM "DocumentChunk" dc
+      JOIN "Document" d ON d."id" = dc."documentId"
+      WHERE d."userId" = $2
+      ORDER BY dc."embedding" <=> $1::vector
+      LIMIT $3
+      `,
+      vector,
+      userId,
+      topK,
+    );
 
-    const minSimilarity = 0.75;
-
-    const scored = chunks
-      .filter((c) => Array.isArray(c.embedding))
-      .map((c) => {
-        const emb = c.embedding as number[];
-
-        return {
-          ...c,
-          similarity: this.cosineSimilarity(queryEmbedding, emb),
-        };
-      })
-      .filter((c) => c.similarity >= minSimilarity)
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, topK);
-
-    return scored;
+    return rows;
   }
 
-  // ================== 👇👇👇 新增：余弦相似度 ==================
-  private cosineSimilarity(a: number[], b: number[]) {
-    let dot = 0,
-      na = 0,
-      nb = 0;
+  // ✅ 新增：关键词检索，用 ILIKE 做简单 keyword search
+  async keywordSearchChunks(userId: string, query: string, topK = 5) {
+    const keywords = query
+      .split(/\s+/)
+      .map((word) => word.trim())
+      .filter(Boolean);
 
-    for (let i = 0; i < a.length; i++) {
-      dot += a[i] * b[i];
-      na += a[i] * a[i];
-      nb += b[i] * b[i];
+    if (keywords.length === 0) {
+      return [];
     }
 
-    return dot / (Math.sqrt(na) * Math.sqrt(nb));
+    const keywordConditions = keywords
+      .map((_, index) => `dc."content" ILIKE $${index + 2}`)
+      .join(' OR ');
+
+    const params = [userId, ...keywords.map((word) => `%${word}%`), topK];
+
+    const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      `
+      SELECT
+        dc."id",
+        dc."documentId",
+        dc."content",
+        dc."createdAt",
+        d."fileName",
+        0.5 AS similarity,
+        'keyword' AS "searchType"
+      FROM "DocumentChunk" dc
+      JOIN "Document" d ON d."id" = dc."documentId"
+      WHERE d."userId" = $1
+        AND (${keywordConditions})
+      LIMIT $${params.length}
+      `,
+      ...params,
+    );
+
+    return rows;
+  }
+
+  // ✅ 新增：Hybrid Search = 向量检索 + 关键词检索 + 去重合并
+  async hybridSearchRelevantChunks(userId: string, query: string, topK = 5) {
+    const vectorResults = await this.searchRelevantChunks(userId, query, topK);
+    const keywordResults = await this.keywordSearchChunks(userId, query, topK);
+
+    const mergedMap = new Map<string, any>();
+
+    for (const item of vectorResults) {
+      mergedMap.set(item.id, {
+        ...item,
+        hybridScore: Number(item.similarity ?? 0),
+      });
+    }
+
+    for (const item of keywordResults) {
+      const existing = mergedMap.get(item.id);
+
+      if (existing) {
+        mergedMap.set(item.id, {
+          ...existing,
+          searchType: 'hybrid',
+          hybridScore: Number(existing.hybridScore ?? 0) + 0.2,
+        });
+      } else {
+        mergedMap.set(item.id, {
+          ...item,
+          hybridScore: 0.5,
+        });
+      }
+    }
+    // === 新增：简单 Rerank 打分函数 ===
+    const scoreWithRerank = (item: any, query: string) => {
+      const text = (item.content || '').toLowerCase();
+      const q = query.toLowerCase();
+
+      // 1) 向量分数（已有）
+      const vectorScore = Number(item.similarity ?? 0);
+
+      // 2) 关键词覆盖：命中越多越高
+      const keywords = q.split(/\s+/).filter(Boolean);
+      let hit = 0;
+      for (const k of keywords) {
+        if (text.includes(k)) hit += 1;
+      }
+      const keywordScore = keywords.length > 0 ? hit / keywords.length : 0;
+
+      // 3) 组合（可调权重）
+      // 向量更重要（0.7），关键词辅助（0.3）
+      const rerankScore = 0.7 * vectorScore + 0.3 * keywordScore;
+
+      return rerankScore;
+    };
+
+    // === 用 rerankScore 重新排序 ===
+    const merged = Array.from(mergedMap.values()).map((item) => ({
+      ...item,
+      rerankScore: scoreWithRerank(item, query),
+    }));
+
+    return merged
+      .sort((a, b) => Number(b.rerankScore) - Number(a.rerankScore))
+      .slice(0, topK);
   }
 }
