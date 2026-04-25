@@ -11,6 +11,7 @@ import * as fs from 'fs/promises';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 import { OpenAIEmbeddings } from '@langchain/openai';
 import { randomUUID } from 'crypto';
+import { normalizeUploadedFileName } from './file-name.util';
 
 @Injectable()
 export class DocsService {
@@ -48,7 +49,8 @@ export class DocsService {
     }
 
     const filePath = file.path;
-    const fileName = file.originalname.toLowerCase();
+    const normalizedOriginalName = normalizeUploadedFileName(file.originalname);
+    const fileName = normalizedOriginalName.toLowerCase();
 
     let docs;
 
@@ -78,7 +80,7 @@ export class DocsService {
     const doc = await this.prisma.document.create({
       data: {
         userId,
-        fileName: file.originalname,
+        fileName: normalizedOriginalName,
         filePath,
         mimeType: file.mimetype,
         content,
@@ -112,7 +114,7 @@ export class DocsService {
   }
 
   async getUserDocuments(userId: string) {
-    return this.prisma.document.findMany({
+    const documents = await this.prisma.document.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
       include: {
@@ -123,6 +125,11 @@ export class DocsService {
         },
       },
     });
+
+    return documents.map((doc) => ({
+      ...doc,
+      fileName: normalizeUploadedFileName(doc.fileName),
+    }));
   }
 
   async deleteDocument(userId: string, documentId: string) {
@@ -146,7 +153,44 @@ export class DocsService {
     return { message: 'Document deleted successfully' };
   }
 
-  // ✅ 纯向量检索：pgvector 根据语义相似度找 chunk
+  private extractSearchKeywords(query: string) {
+    const normalized = query.toLowerCase().trim();
+    if (!normalized) {
+      return [];
+    }
+
+    const tokens: string[] = [];
+
+    for (const token of normalized.split(/\s+/)) {
+      if (token.length >= 2) {
+        tokens.push(token);
+      }
+    }
+
+    const latinTokens = normalized.match(/[a-z0-9]{2,}/g) || [];
+    tokens.push(...latinTokens);
+
+    const cjkSegments = normalized.match(/[\u3400-\u9fff]+/g) || [];
+    for (const segment of cjkSegments) {
+      if (segment.length >= 2) {
+        tokens.push(segment);
+      }
+
+      const maxN = Math.min(4, segment.length);
+      for (let n = 2; n <= maxN; n += 1) {
+        for (let i = 0; i <= segment.length - n; i += 1) {
+          tokens.push(segment.slice(i, i + n));
+        }
+      }
+    }
+
+    const deduped = Array.from(
+      new Set(tokens.map((token) => token.trim()).filter(Boolean)),
+    );
+
+    return deduped.slice(0, 12);
+  }
+
   async searchRelevantChunks(userId: string, query: string, topK = 5) {
     const queryEmbedding = await this.getEmbedding(query);
     const vector = `[${queryEmbedding.join(',')}]`;
@@ -175,13 +219,8 @@ export class DocsService {
     return rows;
   }
 
-  // ✅ 新增：关键词检索，用 ILIKE 做简单 keyword search
   async keywordSearchChunks(userId: string, query: string, topK = 5) {
-    const keywords = query
-      .split(/\s+/)
-      .map((word) => word.trim())
-      .filter(Boolean);
-
+    const keywords = this.extractSearchKeywords(query);
     if (keywords.length === 0) {
       return [];
     }
@@ -214,7 +253,6 @@ export class DocsService {
     return rows;
   }
 
-  // ✅ 新增：Hybrid Search = 向量检索 + 关键词检索 + 去重合并
   async hybridSearchRelevantChunks(userId: string, query: string, topK = 5) {
     const vectorResults = await this.searchRelevantChunks(userId, query, topK);
     const keywordResults = await this.keywordSearchChunks(userId, query, topK);
@@ -244,34 +282,49 @@ export class DocsService {
         });
       }
     }
-    // === 新增：简单 Rerank 打分函数 ===
-    const scoreWithRerank = (item: any, query: string) => {
-      const text = (item.content || '').toLowerCase();
-      const q = query.toLowerCase();
 
-      // 1) 向量分数（已有）
+    const keywordTokens = this.extractSearchKeywords(query);
+
+    const scoreWithRerank = (item: any) => {
+      const text = String(item.content || '').toLowerCase();
       const vectorScore = Number(item.similarity ?? 0);
 
-      // 2) 关键词覆盖：命中越多越高
-      const keywords = q.split(/\s+/).filter(Boolean);
       let hit = 0;
-      for (const k of keywords) {
-        if (text.includes(k)) hit += 1;
+      for (const token of keywordTokens) {
+        if (text.includes(token)) {
+          hit += 1;
+        }
       }
-      const keywordScore = keywords.length > 0 ? hit / keywords.length : 0;
 
-      // 3) 组合（可调权重）
-      // 向量更重要（0.7），关键词辅助（0.3）
-      const rerankScore = 0.7 * vectorScore + 0.3 * keywordScore;
+      const keywordScore =
+        keywordTokens.length > 0 ? hit / keywordTokens.length : 0;
 
-      return rerankScore;
+      return 0.7 * vectorScore + 0.3 * keywordScore;
     };
 
-    // === 用 rerankScore 重新排序 ===
     const merged = Array.from(mergedMap.values()).map((item) => ({
       ...item,
-      rerankScore: scoreWithRerank(item, query),
+      rerankScore: scoreWithRerank(item),
     }));
+
+    if (process.env.DEBUG_RAG === 'true') {
+      const topPreview = merged
+        .sort((a, b) => Number(b.rerankScore) - Number(a.rerankScore))
+        .slice(0, Math.min(3, merged.length))
+        .map((item) => ({
+          fileName: item.fileName,
+          searchType: item.searchType,
+          similarity: item.similarity,
+          rerankScore: item.rerankScore,
+          preview: String(item.content || '').slice(0, 80),
+        }));
+
+      console.log('[RAG DEBUG] query:', query);
+      console.log('[RAG DEBUG] keywordTokens:', keywordTokens);
+      console.log('[RAG DEBUG] vectorCount:', vectorResults.length);
+      console.log('[RAG DEBUG] keywordCount:', keywordResults.length);
+      console.log('[RAG DEBUG] topChunks:', topPreview);
+    }
 
     return merged
       .sort((a, b) => Number(b.rerankScore) - Number(a.rerankScore))

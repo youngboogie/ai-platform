@@ -13,6 +13,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { DocsService } from './docs.service';
+import { normalizeUploadedFileName } from './file-name.util';
 
 type JwtUser = {
   sub: string;
@@ -30,7 +31,9 @@ export class DocsController {
       storage: diskStorage({
         destination: './uploads',
         filename: (_req, file, cb) => {
-          const uniqueName = `${Date.now()}-${file.originalname}`;
+          const normalizedName = normalizeUploadedFileName(file.originalname);
+          file.originalname = normalizedName;
+          const uniqueName = `${Date.now()}-${normalizedName}`;
           cb(null, uniqueName);
         },
       }),
