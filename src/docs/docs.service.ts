@@ -196,6 +196,7 @@ export class DocsService {
     const vector = `[${queryEmbedding.join(',')}]`;
 
     const rows = await this.prisma.$queryRawUnsafe<any[]>(
+      //将用户的问题转换成向量，并与数据库中的文档块进行相似度计算，返回最相关的结果
       `
       SELECT 
         dc."id",

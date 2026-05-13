@@ -8,7 +8,6 @@ import { DocsService } from '../docs/docs.service';
 import { ChatOpenAI } from '@langchain/openai';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { PgVectorRetriever } from '../docs/pgvector.retriever';
-import { RunnableSequence } from '@langchain/core/runnables';
 import { Document } from '@langchain/core/documents';
 import { createRagGraph } from './rag.graph';
 
@@ -148,7 +147,7 @@ export class ChatService {
 
       let retrievedDocs: Document[] = [];
 
-      const prompt = new PromptTemplate({
+      const ragPrompt = new PromptTemplate({
         template: `
 你是一个有帮助的 AI 助手。
 
@@ -173,11 +172,76 @@ export class ChatService {
 `,
         inputVariables: ['userId', 'email', 'history', 'context', 'question'],
       });
+      const directPrompt = new PromptTemplate({
+        template: `
+你是一个有帮助的 AI 助手。
+
+当前用户信息：
+- 用户ID：{userId}
+- 邮箱：{email}
+
+聊天历史：
+{history}
+
+问题：
+{question}
+
+路由原因：
+{routeReason}
+
+回答要求：
+1. 本轮不要依赖用户私有文档内容，直接基于通用知识回答。
+2. 如果问题信息不足，先给出最稳妥答案，并提示用户补充条件。
+3. 如果你无法可靠确定答案，要明确说明不确定点。
+`,
+        inputVariables: ['userId', 'email', 'history', 'question', 'routeReason'],
+      });
+
+      const toolPrompt = new PromptTemplate({
+        template: `
+你是一个有帮助的 AI 助手。
+
+当前用户信息：
+- 用户ID：{userId}
+- 邮箱：{email}
+
+聊天历史：
+{history}
+
+问题：
+{question}
+
+路由原因：
+{routeReason}
+
+工具执行结果：
+- 工具名：{toolName}
+- 工具输入：{toolInput}
+- 工具输出：{toolResult}
+
+回答要求：
+1. 优先基于工具输出给出结论。
+2. 用自然语言解释关键步骤，但不要编造工具未返回的数据。
+3. 如果工具结果不足以完整回答，明确指出缺口。
+`,
+        inputVariables: [
+          'userId',
+          'email',
+          'history',
+          'question',
+          'toolName',
+          'toolInput',
+          'toolResult',
+          'routeReason',
+        ],
+      });
 
       const ragGraph = createRagGraph({
         retriever,
         modelClient,
-        prompt,
+        ragPrompt,
+        directPrompt,
+        toolPrompt,
       });
 
       const graphResult = await ragGraph.invoke({
@@ -190,6 +254,11 @@ export class ChatService {
       console.log('RAG GRAPH RESULT:', graphResult);
 
       retrievedDocs = graphResult.docs ?? [];
+      const route = graphResult.route ?? 'rag';
+      const routeReason = graphResult.routeReason ?? '';
+      const toolName = graphResult.toolName ?? 'none';
+      const toolResult = graphResult.toolResult ?? '';
+      const retrievalStats = graphResult.retrievalStats ?? null;
 
       const reply = graphResult.answer ?? '';
       //     const reply =
@@ -211,8 +280,14 @@ export class ChatService {
               similarity: doc.metadata.similarity,
               searchType: doc.metadata.searchType,
               hybridScore: doc.metadata.hybridScore,
+              rerankScore: doc.metadata.rerankScore,
               content: doc.pageContent,
             })),
+            route,
+            routeReason,
+            toolName,
+            toolResult,
+            retrievalStats,
           },
         },
       });
@@ -227,7 +302,13 @@ export class ChatService {
           similarity: doc.metadata.similarity,
           searchType: doc.metadata.searchType,
           hybridScore: doc.metadata.hybridScore,
+          rerankScore: doc.metadata.rerankScore,
         })),
+        route,
+        routeReason,
+        toolName,
+        toolResult,
+        retrievalStats,
       };
     } catch (error: any) {
       console.error('上游错误：', error?.response?.data || error.message);
